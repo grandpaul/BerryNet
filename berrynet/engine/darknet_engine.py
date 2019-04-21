@@ -40,6 +40,14 @@ class BOX(Structure):
                 ("w", c_float),
                 ("h", c_float)]
 
+class DETECTION(Structure):
+    _fields_ = [("bbox", BOX),
+                ("classes", c_int),
+                ("prob", POINTER(c_float)),
+                ("mask", POINTER(c_float)),
+                ("objectness", c_float),
+                ("sort_class", c_int)]
+    
 class IMAGE(Structure):
     _fields_ = [("w", c_int),
                 ("h", c_int),
@@ -51,7 +59,7 @@ class METADATA(Structure):
                 ("names", POINTER(c_char_p))]
 
 
-lib = CDLL("/usr/lib/libdarknet.so", RTLD_GLOBAL)
+lib = CDLL("/usr/lib/darknet/libdarknet.so", RTLD_GLOBAL)
 lib.network_width.argtypes = [c_void_p]
 lib.network_width.restype = c_int
 lib.network_height.argtypes = [c_void_p]
@@ -65,20 +73,16 @@ make_image = lib.make_image
 make_image.argtypes = [c_int, c_int, c_int]
 make_image.restype = IMAGE
 
-make_boxes = lib.make_boxes
-make_boxes.argtypes = [c_void_p]
-make_boxes.restype = POINTER(BOX)
+make_network_boxes = lib.make_network_boxes
+make_network_boxes.argtypes = [c_void_p]
+make_network_boxes.restype = POINTER(DETECTION)
+
+get_network_boxes = lib.get_network_boxes
+get_network_boxes.argtypes = [c_void_p, c_int, c_int, c_float, c_float, POINTER(c_int), c_int, POINTER(c_int)]
+get_network_boxes.restype = POINTER(DETECTION)
 
 free_ptrs = lib.free_ptrs
 free_ptrs.argtypes = [POINTER(c_void_p), c_int]
-
-num_boxes = lib.num_boxes
-num_boxes.argtypes = [c_void_p]
-num_boxes.restype = c_int
-
-make_probs = lib.make_probs
-make_probs.argtypes = [c_void_p]
-make_probs.restype = POINTER(POINTER(c_float))
 
 reset_rnn = lib.reset_rnn
 reset_rnn.argtypes = [c_void_p]
@@ -109,9 +113,8 @@ predict_image = lib.network_predict_image
 predict_image.argtypes = [c_void_p, IMAGE]
 predict_image.restype = POINTER(c_float)
 
-network_detect = lib.network_detect
-network_detect.argtypes = [c_void_p, IMAGE, c_float, c_float, c_float, POINTER(BOX), POINTER(POINTER(c_float))]
-
+free_detections = lib.free_detections
+free_detections.argtypes = [POINTER(DETECTION), c_int]
 
 def c_array(ctype, values):
     arr = (ctype*len(values))()
@@ -141,30 +144,34 @@ def nparray_to_image(arr):
 
 def detect_np(net, meta, np_img, thresh=.3, hier_thresh=.5, nms=.45):
     im = nparray_to_image(np_img)
-    boxes = make_boxes(net)
-    probs = make_probs(net)
-    num = num_boxes(net)
+    num = c_int(0)
+    pnum = pointer(num)
+    predict_image(net, im)
+
     t_start = time.time()
-    network_detect(net, im, thresh, hier_thresh, nms, boxes, probs)
+    dets = get_network_boxes(net, im.w, im.h, thresh, hier_thresh, None, 0, pnum)
+    num = pnum[0]
     t_end = time.time()
     logger.debug('inference time: {} s'.format(t_end - t_start))
+
     res = []
     for j in range(num):
         for i in range(meta.classes):
-            if probs[j][i] > 0:
+            if dets[j].prob[i] > 0:
+                boxes = dets[j].bbox
                 res.append(
                     {
                         'type': 'detection',
                         'label': meta.names[i].decode('utf-8'),
-                        'confidence': probs[j][i],
-                        'left': boxes[j].x - (boxes[j].w / 2),
-                        'top': boxes[j].y - (boxes[j].h / 2),
-                        'right': boxes[j].x + (boxes[j].w / 2),
-                        'bottom': boxes[j].y + (boxes[j].h / 2),
+                        'confidence': dets[j].prob[i],
+                        'left': boxes.x - (boxes.w / 2),
+                        'top': boxes.y - (boxes.h / 2),
+                        'right': boxes.x + (boxes.w / 2),
+                        'bottom': boxes.y + (boxes.h / 2),
                         'id': -1
                     }
                 )
-    free_ptrs(cast(probs, POINTER(c_void_p)), num)
+    free_detections(dets, num)
     return res
 
 
@@ -195,11 +202,11 @@ class DarknetEngine(DLEngine):
 
 if __name__ == '__main__':
     engine = DarknetEngine(
-        config=b'/usr/share/dlmodels/tinyyolovoc-20170816/tiny-yolo-voc.cfg',
-        model=b'/usr/share/dlmodels/tinyyolovoc-20170816/tiny-yolo-voc.weights',
-        meta=b'/usr/share/dlmodels/tinyyolovoc-20170816/voc.data'
+        config=b'/usr/share/darknet/cfg/yolov3-tiny.cfg',
+        model=b'/tmp/yolov3-tiny.weights',
+        meta=b'/usr/share/darknet/cfg/coco.data'
     )
-    im = cv2.imread('data/dog.jpg')
+    im = cv2.imread('/usr/share/darknet/data/dog.jpg')
     for i in range(3):
         r = engine.inference(im)
         print(r)
